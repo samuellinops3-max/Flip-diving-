@@ -5,18 +5,9 @@ jobs:
     runs-on: ubuntu-latest
     container: ps3dev/psl1ght:latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Get minimp3
-        run: |
-          curl -L https://raw.githubusercontent.com/lieff/minimp3/master/minimp3.h -o minimp3.h
-          curl -L https://raw.githubusercontent.com/lieff/minimp3/master/minimp3_ex.h -o minimp3_ex.h
-          ls -lh minimp3.h minimp3_ex.h
-
+      - uses: actions/checkout@v4
       - name: Build
         run: make
-
       - name: Upload PKG
         uses: actions/upload-artifact@v4
         with:
