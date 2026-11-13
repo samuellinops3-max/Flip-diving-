@@ -1,0 +1,29 @@
+name: Build PS3 PKG
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compilar com PSL1GHT (ps3dev/psl1ght)
+        run: |
+          docker pull ps3dev/psl1ght:latest
+          docker run --rm -v "$GITHUB_WORKSPACE":/src -w /src ps3dev/psl1ght:latest sh -c '
+            export PS3DEV=${PS3DEV:-/usr/local/ps3dev}
+            export PSL1GHT=${PSL1GHT:-$PS3DEV}
+            export PATH=$PATH:$PS3DEV/bin:$PS3DEV/ppu/bin
+            (python3 tools/mkicon.py || python tools/mkicon.py) || true
+            make
+            make pkg
+          '
+
+      - name: Enviar PKG
+        uses: actions/upload-artifact@v4
+        with:
+          name: SaltoMortal-PS3-PKG
+          path: "*.pkg"
