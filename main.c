@@ -1,4 +1,4 @@
-// MEU PLAYER MP3 - PS3 PSL1GHT - FUNCIONANDO
+// MEU PLAYER MP3 - PS3 PSL1GHT - BASE COBRA ARENA QUE JA FUNCIONA
 // Cima/Baixo = escolher | X = tocar | Quadrado = pausar | L1/R1 = anterior/proxima | Esq/Dir = volume
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,7 +38,9 @@ static void sysutil_cb(u64 s,u64 p,void*u){ (void)p;(void)u; if(s==SYSUTIL_EXIT_
 static void init_screen(void){
   void *host=memalign(1024*1024,HOST_SIZE); rsxInit(&ctx,CB_SIZE,HOST_SIZE,host);
   videoState st; videoGetState(VIDEO_PRIMARY,0,&st);
-  u32 resid=VIDEO_RESOLUTION_720; videoResolution res; videoGetResolution(resid,&res);
+  u32 resid=st.displayMode.resolution;
+  if(videoGetResolutionAvailability(VIDEO_PRIMARY,VIDEO_RESOLUTION_720,VIDEO_ASPECT_AUTO,0)) resid=VIDEO_RESOLUTION_720;
+  videoResolution res; videoGetResolution(resid,&res);
   W=res.width; H=res.height; videoConfiguration vc; memset(&vc,0,sizeof(vc));
   vc.resolution=resid; vc.format=VIDEO_BUFFER_FORMAT_XRGB; vc.aspect=VIDEO_ASPECT_AUTO; vc.pitch=W*4;
   videoConfigure(VIDEO_PRIMARY,&vc,NULL,0); videoGetState(VIDEO_PRIMARY,0,&st);
@@ -106,7 +108,6 @@ static int open_wav_file(const char *path){
   for(long i=0;i<frames;i++){ int16_t l=(int16_t)(tmp[i*ch*2]|(tmp[i*ch*2+1]<<8)); int16_t r=l; if(ch==2) r=(int16_t)(tmp[i*ch*2+2]|(tmp[i*ch*2+3]<<8)); pcm[2*i]=l; pcm[2*i+1]=r; }
   free(tmp); fclose(f); pcm_total=frames; pcm_rate=rate; pcm_pos=0; pcm_step=(double)rate/48000.0; track_done=0; return 1;
 }
-
 static int open_mp3_file(const char *path){
   FILE *f=fopen(path,"rb"); if(!f) return 0; fseek(f,0,SEEK_END); long fsize=ftell(f); fseek(f,0,SEEK_SET); if(fsize<=0){ fclose(f); return 0; }
   uint8_t *data=(uint8_t*)malloc(fsize); if(!data){ fclose(f); return 0; } if(fread(data,1,fsize,f)!=(size_t)fsize){ free(data); fclose(f); return 0; } fclose(f);
@@ -116,7 +117,6 @@ static int open_mp3_file(const char *path){
   while(off<fsize){ int samples=mp3dec_decode_frame(&dec,data+off,(int)(fsize-off),tmp,&info); if(info.frame_bytes<=0) break; off+=info.frame_bytes; if(samples>0){ if(total+samples>=cap){ cap*=2; pcm=(int16_t*)realloc(pcm,cap*2*sizeof(int16_t)); if(!pcm){ free(data); return 0; } } for(int i=0;i<samples;i++){ int16_t l=tmp[2*i]; int16_t r=(info.channels==1?l:tmp[2*i+1]); pcm[2*(total+i)]=l; pcm[2*(total+i)+1]=r; } total+=samples; pcm_rate=info.hz; } if(info.frame_bytes==0) break; }
   free(data); if(total==0){ free_pcm(); return 0; } pcm_total=total; pcm_pos=0; pcm_step=(double)pcm_rate/48000.0; track_done=0; return 1;
 }
-
 static int open_track_file(const char *path){ free_pcm(); size_t l=strlen(path); if(l>=4&&tolower((unsigned char)path[l-3])=='m'&&tolower((unsigned char)path[l-2])=='p'&&tolower((unsigned char)path[l-1])=='3') return open_mp3_file(path); return open_wav_file(path); }
 static void fill_block(float *out){ float peak=0; for(int n=0;n<BLKS;n++){ float l=0,r=0; if(pcm&&playing>=0&&!paused&&!track_done){ long i=(long)pcm_pos; float fr=(float)(pcm_pos-(double)i); if(i+1>=pcm_total) track_done=1; else{ const int16_t *a=pcm+2*i; float al=a[0],ar=a[1],bl=a[2],br=a[3]; l=(al+(bl-al)*fr)/32768.0f*volume; r=(ar+(br-ar)*fr)/32768.0f*volume; pcm_pos+=pcm_step; } } out[2*n]=l; out[2*n+1]=r; float m=fabsf(l)>fabsf(r)?fabsf(l):fabsf(r); if(m>peak) peak=m; } level=level*0.85f+peak*0.15f; }
 static void audio_pump(void){ if(!audio_ok) return; u32 rd=*arix; int guard=NBLK; while((int)rd!=wblk&&guard-->0){ fill_block(abuf+wblk*BLKS*2); wblk=(wblk+1)%NBLK; } }
