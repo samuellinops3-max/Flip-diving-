@@ -5,9 +5,9 @@ include $(PSL1GHT)/ppu_rules
 
 .DEFAULT_GOAL := all
 
-TARGET    := dive
-TITLE     := Mergulho Flip
-APPID     := DIVE00001
+TARGET    := player
+TITLE     := Meu Player
+APPID     := MUSI00001
 CONTENTID := UP0001-$(APPID)_00-0000000000000000
 SFOXML    := sfo.xml
 PORTLIBS  := $(PS3DEV)/portlibs/ppu
@@ -15,7 +15,7 @@ PORTLIBS  := $(PS3DEV)/portlibs/ppu
 MACHDEP := -mhard-float -fmodulo-sched -ffunction-sections -fdata-sections
 CFLAGS  := -O2 -Wall -mcpu=cell $(MACHDEP) -I$(PSL1GHT)/ppu/include -I$(PORTLIBS)/include
 LDFLAGS := $(MACHDEP) -L$(PSL1GHT)/ppu/lib -L$(PORTLIBS)/lib
-LIBS    := -lrsx -lgcm_sys -lio -lsysutil -lrt -llv2 -lm
+LIBS    := -lrsx -lgcm_sys -laudio -lio -lsysutil -lrt -llv2 -lm
 
 all: $(TARGET).pkg
 
