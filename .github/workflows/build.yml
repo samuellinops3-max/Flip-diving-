@@ -1,57 +1,24 @@
-name: Compilar PKG
-
-on:
-  push:
-  workflow_dispatch:
-
+name: build
+on: [push]
 jobs:
   build:
     runs-on: ubuntu-latest
-    container: ubuntu:20.04
+    container: ps3dev/psl1ght:latest
     steps:
-      - name: Dependencias
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get minimp3
         run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y curl make git python2 python3 libgmp10 libelf1 zlib1g libssl1.1 bzip2 xz-utils
-          ln -sf /usr/bin/python2 /usr/bin/python
+          curl -L https://raw.githubusercontent.com/lieff/minimp3/master/minimp3.h -o minimp3.h
+          curl -L https://raw.githubusercontent.com/lieff/minimp3/master/minimp3_ex.h -o minimp3_ex.h
+          ls -lh minimp3.h minimp3_ex.h
 
-      - uses: actions/checkout@v4
-
-      - name: Baixar toolchain do PS3
-        run: |
-          curl -sL https://github.com/bucanero/ps3toolchain/releases/download/ubuntu-latest-fad3b5fb/ps3dev-ubuntu-latest-2020-08-31.tar.gz | tar xz -C /opt
-          ls /opt/ps3dev
-          echo "PS3DEV=/opt/ps3dev" >> $GITHUB_ENV
-          echo "PSL1GHT=/opt/ps3dev" >> $GITHUB_ENV
-          echo "/opt/ps3dev/bin" >> $GITHUB_PATH
-          echo "/opt/ps3dev/ppu/bin" >> $GITHUB_PATH
-
-      - name: Gerar icone
-        run: |
-          python3 - <<'PY'
-          import zlib, struct
-          W, H = 320, 176
-          bars = [(50 + i * 24, 40 + (i * 37) % 70) for i in range(10)]
-          raw = b''
-          for y in range(H):
-              raw += b'\x00'
-              for x in range(W):
-                  px = (14 + y // 10, 18 + y // 8, 40 + y // 2)
-                  for i, (bx, bh) in enumerate(bars):
-                      if bx <= x < bx + 16 and H - 20 - bh <= y < H - 20:
-                          px = (85, 214, 255) if i % 2 == 0 else (102, 255, 102)
-                  raw += bytes(px)
-          def chunk(t, d):
-              c = struct.pack('>I', len(d)) + t + d
-              return c + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
-          png = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', W, H, 8, 2, 0, 0, 0)) + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b'')
-          open('ICON0.PNG', 'wb').write(png)
-          PY
-
-      - name: Compilar
+      - name: Build
         run: make
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload PKG
+        uses: actions/upload-artifact@v4
         with:
-          name: meu-player-pkg
-          path: player.pkg
+          name: meu-player-mp3
+          path: "*.pkg"
