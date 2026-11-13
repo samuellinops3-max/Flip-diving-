@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <stdint.h>
 #include <math.h>
 #include <ctype.h>
 #include <dirent.h>
@@ -51,7 +50,9 @@ static void init_screen(void)
 
     videoState st;
     videoGetState(VIDEO_PRIMARY, 0, &st);
-    u32 resid = VIDEO_RESOLUTION_720;
+    u32 resid = st.displayMode.resolution;
+    if (videoGetResolutionAvailability(VIDEO_PRIMARY, VIDEO_RESOLUTION_720, VIDEO_ASPECT_AUTO, 0))
+        resid = VIDEO_RESOLUTION_720;
 
     videoResolution res;
     videoGetResolution(resid, &res);
@@ -208,6 +209,7 @@ static void scan_music(void)
         }
         closedir(dp);
     }
+    /* ordena por nome */
     for (int i = 0; i < ntr; i++)
         for (int j = i + 1; j < ntr; j++)
             if (strcasecmp(tname[j], tname[i]) < 0) {
@@ -228,6 +230,7 @@ static int audio_ok = 0;
 static float volume = 0.8f;
 static float level = 0.0f;
 
+/* arquivo WAV em streaming */
 static FILE *wf = NULL;
 static int w_ch = 2;
 static long w_rate = 44100, w_left = 0, w_total = 0;
@@ -293,13 +296,13 @@ static int fill_more(void)
     long want = SBN - sb_n;
     if (want > w_left) want = w_left;
     if (want <= 0) return 0;
-    size_t fb_ = (size_t)(w_ch * 2);
-    size_t got = fread(raw, fb_, (size_t)want, wf);
+    size_t fsz = (size_t)(w_ch * 2);
+    size_t got = fread(raw, fsz, (size_t)want, wf);
     if (got == 0) return 0;
     for (size_t i = 0; i < got; i++) {
-        int16_t l = (int16_t)(raw[i * fb_] | (raw[i * fb_ + 1] << 8));
+        int16_t l = (int16_t)(raw[i * fsz] | (raw[i * fsz + 1] << 8));
         int16_t r = l;
-        if (w_ch == 2) r = (int16_t)(raw[i * fb_ + 2] | (raw[i * fb_ + 3] << 8));
+        if (w_ch == 2) r = (int16_t)(raw[i * fsz + 2] | (raw[i * fsz + 3] << 8));
         sb[2 * (sb_n + (long)i)] = l;
         sb[2 * (sb_n + (long)i) + 1] = r;
     }
@@ -355,13 +358,13 @@ static void audio_start(void)
     memset(&p, 0, sizeof(p));
     p.numChannels = 2;
     p.numBlocks = NBLK;
-    p.attr = 0;
+    p.attrib = 0;
     p.level = 1.0f;
     if (audioInit() != 0) return;
     if (audioPortOpen(&p, &aport) != 0) return;
     audioGetPortConfig(aport, &acfg);
-    abuf = (float *)(uintptr_t)acfg.audioDataStart;
-    arix = (volatile u32 *)(uintptr_t)acfg.readIndex;
+    abuf = (float *)(u64)acfg.audioDataStart;
+    arix = (volatile u32 *)(u64)acfg.readIndex;
     memset(abuf, 0, NBLK * BLKS * 2 * sizeof(float));
     wblk = 0;
     audioPortStart(aport);
@@ -433,9 +436,9 @@ static void render(void)
         return;
     }
 
+    /* lista */
     int rows = 9;
     int top = sel - rows / 2;
-    if (top < 0) top = 0;
     if (top > ntr - rows) top = ntr - rows;
     if (top < 0) top = 0;
     for (int r = 0; r < rows && top + r < ntr; r++) {
@@ -449,13 +452,14 @@ static void render(void)
         draw_text(nm, (int)(90 * S), y, ui * 2, col);
     }
 
+    /* barra de progresso */
     R(40, 560, 1200, 12, 0x00303A55);
     if (playing >= 0 && w_total > 0) {
         float frac = (float)(w_pos / (double)w_total);
         if (frac > 1) frac = 1;
         R(40, 560, 1200 * frac, 12, 0x0055D6FF);
         char t1[16], t2[16];
-        fmt_time(t1, (long)(w_pos / 48000.0));
+        fmt_time(t1, (long)(w_pos / (double)w_rate));
         fmt_time(t2, w_total / w_rate);
         sprintf(buf, "%s / %s", t1, t2);
         draw_text(buf, (int)(40 * S), (int)(585 * S), ui * 2, 0x00FFFFFF);
@@ -465,10 +469,12 @@ static void render(void)
         draw_text("PRESS X TO PLAY", (int)(40 * S), (int)(585 * S), ui * 2, 0x00809BBF);
     }
 
+    /* volume */
     draw_text("VOL", (int)(900 * S), (int)(585 * S), ui * 2, 0x00FFFFFF);
     R(990, 592, 250, 14, 0x00303A55);
     R(990, 592, 250 * volume, 14, 0x00FFD23F);
 
+    /* medidor */
     float lv = level * 2.2f;
     if (lv > 1) lv = 1;
     for (int b = 0; b < 16; b++) {
