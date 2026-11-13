@@ -1,380 +1,490 @@
-// Salto Mortal PS3 - jogo original inspirado em saltos ornamentais
-// X = pular / girar | START = reiniciar | ESQ/DIR = trocar fase (no trampolim)
+// Mergulho Flip - saltos ornamentais, offline, nativo para PS3 (PSL1GHT)
+// X = pular | analogico/direcional/L1/R1 = girar | QUADRADO = grupar (gira mais rapido)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
 #include <math.h>
-#include <ctype.h>
-#include <malloc.h>
 #include <unistd.h>
-#include <ppu-lv2.h>
-#include <io/pad.h>
-#include <rsx/rsx.h>
-#include <sysutil/video.h>
+#include <malloc.h>
+#include <ppu-types.h>
 #include <sysutil/sysutil.h>
+#include <sysutil/video.h>
+#include <rsx/rsx.h>
+#include <io/pad.h>
 
-#define W 640            // resolucao logica do jogo
-#define H 360
-#define WATER_Y 310
-#define PI 3.14159265f
-#define G 800.0f         // gravidade
-#define JUMP_V 260.0f    // impulso do pulo
-#define OMEGA 20.0f      // velocidade de rotacao (rad/s)
-#define DRIFT 70.0f      // avanco horizontal
-#define TOL 0.6f         // tolerancia de angulo na entrada (rad)
-#define MAX_FLIPS 5
-#define DT (1.0f/60.0f)
+#define CB_SIZE   (0x100000)
+#define HOST_SIZE (32 * 1024 * 1024)
 
-#define CB_SIZE   0x100000
-#define HOST_SIZE (32*1024*1024)
+#define PI      3.14159265f
+#define DT      (1.0f / 60.0f)
+#define WATERY  560.0f
+#define NDIVES  5
+#define NPART   64
 
-/* ---------- video / RSX ---------- */
-typedef struct { int height, width; uint32_t *ptr; uint32_t offset; } rsxBuffer;
-static gcmContextData *context;
-static videoState vstate;
-static videoConfiguration vconfig;
-static videoResolution vres;
-static rsxBuffer buffers[2];
-static int currentBuffer = 0;
+/* ---------- video ---------- */
+static gcmContextData *ctx;
+static u32 W, H;
+static u32 *fb[2];
+static u32 fboff[2];
+static u32 *back;
+static int cur = 0, first_flip = 1;
 static volatile int running = 1;
+static float S = 1.0f;
 
-static void wait_flip(void) {
-  while (gcmGetFlipStatus() != 0) usleep(200);
-  gcmResetFlipStatus();
-}
-static int do_flip(s32 buf) {
-  if (gcmSetFlip(context, buf) == 0) {
-    rsxFlushBuffer(context);
-    gcmSetWaitFlip(context);
-    return 1;
-  }
-  return 0;
-}
-static int make_buffer(rsxBuffer *b, int w, int h, int id) {
-  int pitch = w * 4;
-  b->ptr = (uint32_t *)rsxMemalign(64, pitch * h);
-  if (!b->ptr) return 0;
-  if (rsxAddressToOffset(b->ptr, &b->offset) != 0) return 0;
-  if (gcmSetDisplayBuffer(id, b->offset, pitch, w, h) != 0) return 0;
-  b->width = w; b->height = h;
-  return 1;
-}
-static void init_screen(void) {
-  void *host = memalign(1024 * 1024, HOST_SIZE);
-  rsxInit(&context, CB_SIZE, HOST_SIZE, host);
-  videoGetState(0, 0, &vstate);
-  videoGetResolution(vstate.displayMode.resolution, &vres);
-  memset(&vconfig, 0, sizeof(vconfig));
-  vconfig.resolution = vstate.displayMode.resolution;
-  vconfig.format = VIDEO_BUFFER_FORMAT_XRGB;
-  vconfig.pitch = vres.width * 4;
-  vconfig.aspect = vstate.displayMode.aspect;
-  videoConfigure(0, &vconfig, NULL, 0);
-  videoGetState(0, 0, &vstate);
-  gcmSetFlipMode(GCM_FLIP_VSYNC);
-  make_buffer(&buffers[0], vres.width, vres.height, 0);
-  make_buffer(&buffers[1], vres.width, vres.height, 1);
-  gcmResetFlipStatus();
-  do_flip(1);
-}
-static void sysutil_cb(u64 status, u64 param, void *ud) {
-  if (status == SYSUTIL_EXIT_GAME) running = 0;
+static void sysutil_cb(u64 status, u64 param, void *usrdata)
+{
+    (void)param; (void)usrdata;
+    if (status == SYSUTIL_EXIT_GAME) running = 0;
 }
 
-/* ---------- desenho 2D (tela logica 640x360, escalada pro buffer RSX) ---------- */
-static uint32_t fb[W * H];
+static void init_screen(void)
+{
+    void *host = memalign(1024 * 1024, HOST_SIZE);
+    rsxInit(&ctx, CB_SIZE, HOST_SIZE, host);
 
-static void rect(int x, int y, int w, int h, uint32_t c) {
-  if (x < 0) { w += x; x = 0; }
-  if (y < 0) { h += y; y = 0; }
-  if (x + w > W) w = W - x;
-  if (y + h > H) h = H - y;
-  if (w <= 0 || h <= 0) return;
-  for (int j = y; j < y + h; j++) {
-    uint32_t *p = &fb[j * W + x];
-    for (int i = 0; i < w; i++) p[i] = c;
-  }
-}
-static void circle(float cx, float cy, float r, uint32_t c) {
-  int x0 = (int)floorf(cx - r), x1 = (int)ceilf(cx + r);
-  int y0 = (int)floorf(cy - r), y1 = (int)ceilf(cy + r);
-  for (int y = y0; y <= y1; y++) {
-    if (y < 0 || y >= H) continue;
-    for (int x = x0; x <= x1; x++) {
-      if (x < 0 || x >= W) continue;
-      float dx = x + 0.5f - cx, dy = y + 0.5f - cy;
-      if (dx * dx + dy * dy <= r * r) fb[y * W + x] = c;
+    videoState st;
+    videoGetState(VIDEO_PRIMARY, 0, &st);
+    u32 resid = st.displayMode.resolution;
+    if (videoGetResolutionAvailability(VIDEO_PRIMARY, VIDEO_RESOLUTION_720, VIDEO_ASPECT_AUTO, 0))
+        resid = VIDEO_RESOLUTION_720;
+
+    videoResolution res;
+    videoGetResolution(resid, &res);
+    W = res.width;
+    H = res.height;
+
+    videoConfiguration vc;
+    memset(&vc, 0, sizeof(vc));
+    vc.resolution = resid;
+    vc.format = VIDEO_BUFFER_FORMAT_XRGB;
+    vc.aspect = VIDEO_ASPECT_AUTO;
+    vc.pitch = W * 4;
+    videoConfigure(VIDEO_PRIMARY, &vc, NULL, 0);
+    videoGetState(VIDEO_PRIMARY, 0, &st);
+
+    gcmSetFlipMode(GCM_FLIP_VSYNC);
+
+    for (int i = 0; i < 2; i++) {
+        fb[i] = (u32 *)rsxMemalign(64, W * H * 4);
+        gcmAddressToOffset(fb[i], &fboff[i]);
+        gcmSetDisplayBuffer(i, fboff[i], W * 4, W, H);
     }
-  }
-}
-static uint32_t lerpc(uint32_t a, uint32_t b, float t) {
-  int ar = (a >> 16) & 255, ag = (a >> 8) & 255, ab = a & 255;
-  int br = (b >> 16) & 255, bg = (b >> 8) & 255, bb = b & 255;
-  return ((int)(ar + (br - ar) * t) << 16) | ((int)(ag + (bg - ag) * t) << 8) | (int)(ab + (bb - ab) * t);
-}
-static void present(rsxBuffer *b) {
-  static int xmap[2048];
-  static int built = 0;
-  if (!built) {
-    for (int x = 0; x < b->width && x < 2048; x++) xmap[x] = x * W / b->width;
-    built = 1;
-  }
-  for (int y = 0; y < b->height; y++) {
-    const uint32_t *src = &fb[(y * H / b->height) * W];
-    uint32_t *dst = b->ptr + y * b->width;
-    for (int x = 0; x < b->width; x++) dst[x] = src[xmap[x]];
-  }
+    back = (u32 *)memalign(64, W * H * 4);
+    memset(back, 0, W * H * 4);
+    gcmResetFlipStatus();
 }
 
-/* fonte 3x5 (A-Z, 0-9, alguns simbolos) */
-static const uint16_t FONT_L[26] = {
-  0x2BED,0x6BAE,0x3923,0x6B6E,0x79A7,0x79A4,0x396B,0x5BED,0x7497,0x126A,0x5BAD,0x4927,0x5FED,
-  0x6B6D,0x2B6A,0x6BA4,0x2B7B,0x6BAD,0x388E,0x7492,0x5B6F,0x5B6A,0x5BFD,0x5AAD,0x5A92,0x72A7};
-static const uint16_t FONT_D[10] = {
-  0x7B6F,0x2C97,0x73E7,0x73CF,0x5BC9,0x79CF,0x79EF,0x7249,0x7BEF,0x7BCF};
-
-static void text_raw(int x, int y, const char *s, int sc, uint32_t col) {
-  for (; *s; s++, x += 4 * sc) {
-    char c = (char)toupper((unsigned char)*s);
-    uint16_t g = 0;
-    if (c >= 'A' && c <= 'Z') g = FONT_L[c - 'A'];
-    else if (c >= '0' && c <= '9') g = FONT_D[c - '0'];
-    else if (c == '!') g = 0x2482;
-    else if (c == '-') g = 0x01C0;
-    else if (c == '+') g = 0x05D0;
-    else if (c == ':') g = 0x0410;
-    for (int r = 0; r < 5; r++)
-      for (int k = 0; k < 3; k++)
-        if ((g >> (14 - (r * 3 + k))) & 1) rect(x + k * sc, y + r * sc, sc, sc, col);
-  }
-}
-static int text_w(const char *s, int sc) { return (int)strlen(s) * 4 * sc - sc; }
-static void text(int x, int y, const char *s, int sc, uint32_t col) {
-  int o = sc / 2 > 0 ? sc / 2 : 1;
-  text_raw(x + o, y + o, s, sc, 0x101018);
-  text_raw(x, y, s, sc, col);
-}
-static void text_c(int y, const char *s, int sc, uint32_t col) {
-  text((W - text_w(s, sc)) / 2, y, s, sc, col);
+static void wait_flip(void)
+{
+    while (gcmGetFlipStatus() != 0) usleep(200);
+    gcmResetFlipStatus();
 }
 
-/* ---------- fases ---------- */
-typedef struct {
-  const char *name; int boardY;
-  uint32_t skyTop, skyBot, st, st2, water, waterL;
-} Level;
-static const Level LV[3] = {
-  {"PISCINA",     250, 0x6EC6F5, 0xE8F8FF, 0xB8BEC8, 0x8E96A3, 0x1CA9E6, 0x8FE3FF},
-  {"PENHASCO",    160, 0x3B7DD8, 0xFFD6A0, 0x8B6B47, 0x5E4630, 0x1B5FA8, 0x6FB4F0},
-  {"PREDIO ALTO",  80, 0x0A0F2E, 0x4B4E8F, 0x4A4F5C, 0x30343F, 0x167C8F, 0x56C7D6},
+static void present(void)
+{
+    if (!first_flip) wait_flip();
+    else gcmResetFlipStatus();
+    memcpy(fb[cur], back, W * H * 4);
+    gcmSetFlip(ctx, cur);
+    rsxFlushBuffer(ctx);
+    gcmSetWaitFlip(ctx);
+    cur ^= 1;
+    first_flip = 0;
+}
+
+/* ---------- desenho ---------- */
+static void fill_rect(int x, int y, int w, int h, u32 c)
+{
+    int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
+    int x1 = x + w, y1 = y + h;
+    if (x1 > (int)W) x1 = W;
+    if (y1 > (int)H) y1 = H;
+    for (int yy = y0; yy < y1; yy++) {
+        u32 *p = back + yy * W;
+        for (int xx = x0; xx < x1; xx++) p[xx] = c;
+    }
+}
+
+static void circle(int cx_, int cy_, int r, u32 c)
+{
+    if (r < 1) r = 1;
+    if (cx_ + r < 0 || cx_ - r >= (int)W || cy_ + r < 0 || cy_ - r >= (int)H) return;
+    for (int dy = -r; dy <= r; dy++) {
+        int y = cy_ + dy;
+        if (y < 0 || y >= (int)H) continue;
+        int hw = (int)sqrtf((float)(r * r - dy * dy));
+        int x0 = cx_ - hw, x1 = cx_ + hw;
+        if (x0 < 0) x0 = 0;
+        if (x1 >= (int)W) x1 = W - 1;
+        u32 *p = back + y * W;
+        for (int x = x0; x <= x1; x++) p[x] = c;
+    }
+}
+
+/* coordenadas virtuais 1280x720 */
+static void R(float x, float y, float w, float h, u32 c)
+{
+    fill_rect((int)(x * S), (int)(y * S), (int)(w * S) + 1, (int)(h * S) + 1, c);
+}
+
+static void C(float x, float y, float r, u32 c)
+{
+    circle((int)(x * S), (int)(y * S), (int)(r * S), c);
+}
+
+static void bone(float x0, float y0, float x1, float y1, float r, u32 c)
+{
+    float dx = x1 - x0, dy = y1 - y0;
+    int n = (int)(sqrtf(dx * dx + dy * dy) / (r * 0.5f)) + 1;
+    for (int i = 0; i <= n; i++) {
+        float t = (float)i / n;
+        C(x0 + dx * t, y0 + dy * t, r, c);
+    }
+}
+
+/* fonte 3x5 minima */
+typedef struct { char c; const char *p; } Glyph;
+static const Glyph glyphs[] = {
+    {'0', "###" "#.#" "#.#" "#.#" "###"}, {'1', ".#." "##." ".#." ".#." "###"},
+    {'2', "###" "..#" "###" "#.." "###"}, {'3', "###" "..#" "###" "..#" "###"},
+    {'4', "#.#" "#.#" "###" "..#" "..#"}, {'5', "###" "#.." "###" "..#" "###"},
+    {'6', "###" "#.." "###" "#.#" "###"}, {'7', "###" "..#" "..#" "..#" "..#"},
+    {'8', "###" "#.#" "###" "#.#" "###"}, {'9', "###" "#.#" "###" "..#" "###"},
+    {'+', "..." ".#." "###" ".#." "..."}, {'/', "..#" "..#" ".#." "#.." "#.."},
+    {'A', ".#." "#.#" "###" "#.#" "#.#"}, {'B', "##." "#.#" "##." "#.#" "##."},
+    {'C', "###" "#.." "#.." "#.." "###"}, {'D', "##." "#.#" "#.#" "#.#" "##."},
+    {'E', "###" "#.." "###" "#.." "###"}, {'F', "###" "#.." "###" "#.." "#.."},
+    {'G', "###" "#.." "#.#" "#.#" "###"}, {'H', "#.#" "#.#" "###" "#.#" "#.#"},
+    {'I', "###" ".#." ".#." ".#." "###"}, {'J', "..#" "..#" "..#" "#.#" "###"},
+    {'K', "#.#" "#.#" "##." "#.#" "#.#"}, {'L', "#.." "#.." "#.." "#.." "###"},
+    {'M', "#.#" "###" "###" "#.#" "#.#"}, {'N', "###" "#.#" "#.#" "#.#" "#.#"},
+    {'O', "###" "#.#" "#.#" "#.#" "###"}, {'P', "###" "#.#" "###" "#.." "#.."},
+    {'Q', "###" "#.#" "#.#" "###" "..#"}, {'R', "##." "#.#" "##." "#.#" "#.#"},
+    {'S', "###" "#.." "###" "..#" "###"}, {'T', "###" ".#." ".#." ".#." ".#."},
+    {'U', "#.#" "#.#" "#.#" "#.#" "###"}, {'V', "#.#" "#.#" "#.#" "#.#" ".#."},
+    {'W', "#.#" "#.#" "###" "###" "#.#"}, {'X', "#.#" "#.#" ".#." "#.#" "#.#"},
+    {'Y', "#.#" "#.#" ".#." ".#." ".#."}, {'Z', "###" "..#" ".#." "#.." "###"},
 };
 
-/* ---------- estado do jogo ---------- */
-enum { ST_BOARD, ST_AIR, ST_SPLASH, ST_OVER };
-static int state, level, score, best, flipsThis, divesOK, lastPts;
-static float dx, dy, vy, ang, tgt, stateT, banner, T;
-static char msg[32];
+static const char *find_glyph(char c)
+{
+    for (unsigned i = 0; i < sizeof(glyphs) / sizeof(glyphs[0]); i++)
+        if (glyphs[i].c == c) return glyphs[i].p;
+    return NULL;
+}
 
-typedef struct { float x, y, vx, vy, life; } Drop;
-static Drop drops[48];
+static int text_width(const char *s, int sc) { return (int)strlen(s) * 4 * sc - sc; }
 
-static void spawn_splash(float x, int n, float power) {
-  for (int i = 0, k = 0; i < 48 && k < n; i++) {
-    if (drops[i].life <= 0) {
-      drops[i].x = x; drops[i].y = WATER_Y;
-      drops[i].vx = ((rand() % 200) - 100) * 0.6f * power;
-      drops[i].vy = -(80 + rand() % 140) * power;
-      drops[i].life = 1.0f; k++;
+static void draw_text(const char *s, int x, int y, int sc, u32 c)
+{
+    for (; *s; s++) {
+        const char *g = find_glyph(*s);
+        if (g)
+            for (int r = 0; r < 5; r++)
+                for (int k = 0; k < 3; k++)
+                    if (g[r * 3 + k] == '#') fill_rect(x + k * sc, y + r * sc, sc, sc, c);
+        x += 4 * sc;
     }
-  }
 }
-static void reset_dive(void) {
-  state = ST_BOARD; dx = 220; dy = LV[level].boardY - 14;
-  vy = 0; ang = 0; tgt = 0; flipsThis = 0; stateT = 0;
+
+static void draw_center(const char *s, int xc, int y, int sc, u32 c)
+{
+    draw_text(s, xc - text_width(s, sc) / 2, y, sc, c);
 }
-static void new_game(void) {
-  score = 0; level = 0; divesOK = 0; banner = 0;
-  for (int i = 0; i < 48; i++) drops[i].life = 0;
-  reset_dive();
+
+/* ---------- jogo ---------- */
+enum { ST_READY, ST_AIR, ST_SPLASH, ST_END };
+
+static int state = ST_READY, dive_no = 1, total = 0, best = 0;
+static int quality = 0, last_pts = 0, last_flips = 0;
+static float st_t = 0, gt = 0;
+static float cx, cy, vy, ang, omega, rot_acc, tuck;
+static float pad_rot = 0;
+static int pad_tuck = 0, pad_x = 0, x_prev = 0;
+
+static const float PLAT[3] = { 360.0f, 300.0f, 240.0f };
+static const char *qname[4] = { "BELLY FLOP", "OK", "GOOD", "PERFECT" };
+static const int qbase[4] = { 5, 30, 60, 100 };
+static const float qfac[4] = { 0.0f, 0.4f, 0.7f, 1.0f };
+static const u32 qcol[4] = { 0x00FF4D4D, 0x00FFD23F, 0x0066FF66, 0x0055D6FF };
+
+static float ppx[NPART], ppy[NPART], pvx[NPART], pvy[NPART], plife[NPART];
+
+static float frand(void) { return (float)rand() / (float)RAND_MAX; }
+static float lerpf(float a, float b, float t) { return a + (b - a) * t; }
+
+static float wrap_pi(float a)
+{
+    while (a > PI) a -= 2 * PI;
+    while (a < -PI) a += 2 * PI;
+    return a;
 }
-static void land(void) {
-  float err = fabsf(tgt - ang);
-  stateT = 0;
-  if (err < TOL) {   // entrou de cabeca
-    int tri = flipsThis * (flipsThis + 1) / 2;   // 1,3,6,10,15
-    int pts = (50 + tri * 100 + (int)((1.0f - err / TOL) * 50.0f)) * (level + 1);
-    score += pts; lastPts = pts; divesOK++;
-    if (score > best) best = score;
-    snprintf(msg, sizeof msg, "%s", err < 0.2f ? "ENTRADA PERFEITA!" : "BOA ENTRADA!");
-    state = ST_SPLASH; spawn_splash(dx, 14, 0.8f);
-  } else {           // bateu a barriga
-    if (score > best) best = score;
-    snprintf(msg, sizeof msg, "BATEU A BARRIGA!");
-    state = ST_OVER; spawn_splash(dx, 30, 1.4f);
-  }
+
+static float plat_y(void)
+{
+    int l = (dive_no - 1) / 2;
+    if (l > 2) l = 2;
+    return PLAT[l];
 }
-static void update(int xp, int startp, int lp, int rp) {
-  T += DT;
-  if (banner > 0) banner -= DT;
-  for (int i = 0; i < 48; i++) if (drops[i].life > 0) {
-    drops[i].life -= DT; drops[i].vy += 500 * DT;
-    drops[i].x += drops[i].vx * DT; drops[i].y += drops[i].vy * DT;
-    if (drops[i].y > WATER_Y && drops[i].vy > 0) drops[i].life = 0;
-  }
-  if (startp) { new_game(); return; }
-  switch (state) {
-  case ST_BOARD:
-    if (lp && level > 0) { level--; reset_dive(); }
-    if (rp && level < 2) { level++; reset_dive(); }
-    if (xp) { vy = -JUMP_V; tgt = PI; flipsThis = 0; state = ST_AIR; }
-    break;
-  case ST_AIR: {
-    if (xp && flipsThis < MAX_FLIPS) { tgt += 2 * PI; flipsThis++; }
-    vy += G * DT; dy += vy * DT; dx += DRIFT * DT;
-    float d = tgt - ang, step = OMEGA * DT;
-    if (d > step) ang += step; else if (d < -step) ang -= step; else ang = tgt;
-    float low = dy + 14.0f * fabsf(cosf(ang)) + 4.0f * fabsf(sinf(ang));
-    if (low >= WATER_Y) land();
-    break; }
-  case ST_SPLASH:
-    stateT += DT; dy += 180 * DT;
-    if (stateT > 1.6f) {
-      if (divesOK % 3 == 0 && level < 2) { level++; banner = 2.2f; }
-      reset_dive();
+
+static void init_dive(void)
+{
+    state = ST_READY;
+    st_t = 0;
+    cx = 235.0f;
+    cy = plat_y() - 48.0f;
+    vy = 0; ang = 0; omega = 0; rot_acc = 0; tuck = 0;
+}
+
+static void splash(int q, float x)
+{
+    int n = (q == 0) ? 40 : (q == 1) ? 24 : (q == 2) ? 16 : 10;
+    float spread = (q == 0) ? 260.0f : (q == 1) ? 200.0f : (q == 2) ? 150.0f : 90.0f;
+    float up = (q == 0) ? 520.0f : (q == 1) ? 340.0f : (q == 2) ? 260.0f : 200.0f;
+    int made = 0;
+    for (int i = 0; i < NPART && made < n; i++) {
+        if (plife[i] > 0) continue;
+        ppx[i] = x + (frand() - 0.5f) * 30.0f;
+        ppy[i] = WATERY;
+        pvx[i] = (frand() - 0.5f) * spread;
+        pvy[i] = -(120.0f + frand() * up);
+        plife[i] = 1.0f + frand() * 0.4f;
+        made++;
     }
-    break;
-  case ST_OVER:
-    stateT += DT; dy += 40 * DT;
-    break;
-  }
+}
+
+static void read_pad(void)
+{
+    padInfo info;
+    padData d;
+    pad_rot = 0; pad_tuck = 0; pad_x = 0;
+    ioPadGetInfo(&info);
+    if (info.status[0]) {
+        ioPadGetData(0, &d);
+        float ax = ((int)d.ANA_L_H - 128) / 128.0f;
+        if (fabsf(ax) < 0.25f) ax = 0;
+        if (d.BTN_RIGHT || d.BTN_R1 || d.BTN_R2) ax = 1;
+        if (d.BTN_LEFT || d.BTN_L1 || d.BTN_L2) ax = -1;
+        pad_rot = ax;
+        pad_tuck = d.BTN_SQUARE || d.BTN_CIRCLE;
+        pad_x = d.BTN_CROSS;
+    }
+}
+
+static void land(void)
+{
+    float e = fabsf(wrap_pi(ang - PI)) + tuck * 0.6f;
+    int q = (e < 0.28f) ? 3 : (e < 0.65f) ? 2 : (e < 1.15f) ? 1 : 0;
+    last_flips = (int)(fabsf(rot_acc) / (2 * PI) + 0.12f);
+    last_pts = qbase[q] + (int)(last_flips * 50 * qfac[q]);
+    quality = q;
+    total += last_pts;
+    cy = WATERY - 30.0f;
+    vy *= 0.45f;
+    state = ST_SPLASH;
+    st_t = 0;
+    splash(q, cx);
+}
+
+static void update_game(void)
+{
+    gt += DT;
+    st_t += DT;
+
+    for (int i = 0; i < NPART; i++) {
+        if (plife[i] <= 0) continue;
+        plife[i] -= DT;
+        pvy[i] += 900.0f * DT;
+        ppx[i] += pvx[i] * DT;
+        ppy[i] += pvy[i] * DT;
+        if (ppy[i] > WATERY + 4) plife[i] = 0;
+    }
+
+    switch (state) {
+    case ST_READY:
+        if (pad_x && !x_prev) { state = ST_AIR; vy = -450.0f; st_t = 0; }
+        break;
+    case ST_AIR: {
+        float tgt = pad_rot * 6.0f * (pad_tuck ? 1.8f : 1.0f);
+        omega += (tgt - omega) * 0.2f;
+        ang += omega * DT;
+        rot_acc += omega * DT;
+        tuck += ((pad_tuck ? 1.0f : 0.0f) - tuck) * 0.25f;
+        vy += 900.0f * DT;
+        cy += vy * DT;
+        cx += 190.0f * DT;
+        if (cy >= WATERY - 30.0f) land();
+        break;
+    }
+    case ST_SPLASH:
+        cy += vy * DT;
+        vy *= 0.96f;
+        cx += 30.0f * DT;
+        ang += omega * DT;
+        omega *= 0.95f;
+        tuck *= 0.9f;
+        if (st_t > 2.2f) {
+            if (dive_no >= NDIVES) {
+                if (total > best) best = total;
+                state = ST_END;
+            } else {
+                dive_no++;
+                init_dive();
+            }
+        }
+        break;
+    case ST_END:
+        if (pad_x && !x_prev) { total = 0; dive_no = 1; init_dive(); }
+        break;
+    }
+    x_prev = pad_x;
 }
 
 /* ---------- render ---------- */
-static void part(float u, float r, uint32_t c) {
-  circle(dx + u * sinf(ang), dy - u * cosf(ang), r, c);
+static void lp(float l, float s, float *ox, float *oy)
+{
+    float sa = sinf(ang), ca = cosf(ang);
+    *ox = cx + sa * l + ca * s;
+    *oy = cy - ca * l + sa * s;
 }
-static void draw_diver(void) {
-  for (float u = -11; u <= -6; u += 2.5f) part(u, 3.0f, 0xF1C27D);  // pernas
-  part(-5, 3.6f, 0x1D3557);                                           // sunga
-  for (float u = -3; u <= 4.5f; u += 2.5f) part(u, 4.3f, 0xE63946);   // tronco
-  part(10, 4.0f, 0xF1C27D);                                           // cabeca
-  part(11.3f, 3.0f, 0x3B2A20);                                        // cabelo
-}
-static void render(void) {
-  const Level *L = &LV[level];
-  int by = L->boardY;
 
-  for (int y = 0; y < H; y++) {
-    float t = (float)y / WATER_Y; if (t > 1) t = 1;
-    rect(0, y, W, 1, lerpc(L->skyTop, L->skyBot, t));
-  }
-  if (level == 0) circle(540, 60, 22, 0xFFE066);
-  if (level == 1) { circle(470, 265, 40, 0xFF9F43); circle(470, 265, 30, 0xFFC27A); }
-  if (level == 2) {
-    circle(540, 60, 18, 0xEDEFFF); circle(547, 55, 16, 0x0E1438);
-    for (int i = 0; i < 45; i++)
-      if (((int)(T * 2) + i) % 7) rect((i * 97 + 13) % W, (i * 53 + 7) % 200, 2, 2, 0xFFFFFF);
-  } else {
-    uint32_t cc = level == 0 ? 0xFFFFFF : 0xFFE9CF;
-    for (int i = 0; i < 3; i++) {
-      float cx = fmodf(80 + i * 230 + T * 8.0f, 760.0f) - 60.0f, cy = 50 + i * 28;
-      circle(cx, cy, 14, cc); circle(cx + 16, cy - 6, 18, cc); circle(cx + 34, cy, 14, cc);
-      rect((int)cx, (int)cy, 36, 14, cc);
+static void pt(float l0, float s0, float l1, float s1, float *ox, float *oy)
+{
+    lp(lerpf(l0, l1, tuck), lerpf(s0, s1, tuck), ox, oy);
+}
+
+static void draw_diver(void)
+{
+    float hx, hy, shx, shy, hpx, hpy, kx, ky, fx, fy, ex, ey, hdx, hdy;
+    u32 skin = 0x00F2C79B;
+    pt(38, 0, 20, 8, &hx, &hy);
+    pt(22, 0, 12, 5, &shx, &shy);
+    pt(-14, 0, -8, 0, &hpx, &hpy);
+    pt(-31, 0, 6, 18, &kx, &ky);
+    pt(-48, 0, -12, 10, &fx, &fy);
+    pt(37, 0, 8, 15, &ex, &ey);
+    pt(52, 0, 2, 16, &hdx, &hdy);
+
+    bone(hpx, hpy, kx, ky, 7, skin);
+    bone(kx, ky, fx, fy, 6, skin);
+    bone(shx, shy, hpx, hpy, 9, 0x00E8453C);
+    C(hpx, hpy, 10, 0x002A4BB8);
+    C(hx, hy, 11, skin);
+    bone(shx, shy, ex, ey, 5, skin);
+    bone(ex, ey, hdx, hdy, 5, skin);
+}
+
+static void draw_water(void)
+{
+    int x0 = (int)(362 * S);
+    int deep = (int)((WATERY + 90) * S);
+    for (int x = x0; x < (int)W; x++) {
+        float vx = x / S;
+        int y0 = (int)((WATERY + sinf(vx * 0.04f + gt * 2.5f) * 3.0f) * S);
+        for (int y = y0; y < (int)H; y++) {
+            u32 *p = &back[y * W + x];
+            if (y - y0 < 3) {
+                *p = 0x00D8F4FF;
+            } else {
+                u32 wc = (y < deep) ? 0x001F86C8 : 0x00104A8A;
+                *p = ((*p >> 1) & 0x007F7F7F) + ((wc >> 1) & 0x007F7F7F);
+            }
+        }
     }
-  }
-
-  // estrutura (piscina / penhasco / predio)
-  rect(0, by, 170, H - by, L->st);
-  if (level == 0) for (int y = by + 10; y < H; y += 14) rect(0, y, 170, 1, L->st2);
-  if (level == 1) {
-    rect(0, by, 160, 6, 0x4C9A2A); rect(120, by + 40, 50, H, L->st2);
-    rect(20, by + 30, 40, 6, L->st2); rect(60, by + 70, 50, 6, L->st2);
-  }
-  if (level == 2) {
-    rect(0, by, 170, 4, L->st2);
-    for (int gy = by + 14; gy < H - 10; gy += 22)
-      for (int gx = 12; gx < 150; gx += 26)
-        rect(gx, gy, 14, 12, ((gx / 26 + gy / 22) % 3 == 0) ? 0xFFD76A : 0x2B2F3A);
-  }
-  // trampolim
-  rect(150, by, 95, 5, 0x2A9D8F); rect(150, by, 95, 1, 0x7FE0D3); rect(150, by + 5, 14, 6, 0x1E6F66);
-
-  if (state != ST_BOARD || 1) draw_diver();
-
-  // agua (cobre o mergulhador quando entra)
-  rect(170, WATER_Y, W - 170, H - WATER_Y, L->water);
-  for (int x = 170; x < W; x += 10) {
-    float wy = WATER_Y + 2.0f * sinf(T * 3 + x * 0.08f);
-    rect(x, (int)wy, 10, 3, L->waterL);
-    rect(x + 3, WATER_Y + 18 + (x / 10) % 3 * 7, 14, 1, L->waterL);
-  }
-  if (state == ST_SPLASH || state == ST_OVER) {
-    int rr = (int)(stateT * 120); if (rr > 100) rr = 100;
-    rect((int)dx - rr, WATER_Y - 1, rr * 2, 2, 0xFFFFFF);
-  }
-  for (int i = 0; i < 48; i++) if (drops[i].life > 0) rect((int)drops[i].x, (int)drops[i].y, 2, 2, 0xFFFFFF);
-
-  // HUD
-  char b[64];
-  snprintf(b, sizeof b, "PONTOS %d", score);       text(8, 6, b, 3, 0xFFFFFF);
-  snprintf(b, sizeof b, "RECORDE %d", best);       text(W - 8 - text_w(b, 2), 8, b, 2, 0xFFE066);
-  snprintf(b, sizeof b, "FASE %d %s", level + 1, L->name); text(8, 28, b, 2, 0xFFFFFF);
-  if (state == ST_AIR) { snprintf(b, sizeof b, "MORTAIS %d", flipsThis); text_c(44, b, 4, 0xFFE066); }
-  if (state == ST_BOARD) {
-    text_c(140, "APERTE X PARA PULAR", 3, 0xFFFFFF);
-    text_c(166, "X NO AR DA MORTAL - TERMINE ANTES DA AGUA", 2, 0xFFFFFF);
-    text_c(H - 18, "START REINICIA - ESQ DIR TROCA FASE", 2, 0xFFFFFF);
-  }
-  if (banner > 0 && state == ST_BOARD) {
-    snprintf(b, sizeof b, "FASE %d: %s", level + 1, L->name); text_c(90, b, 4, 0xFFE066);
-  }
-  if (state == ST_SPLASH) {
-    text_c(100, msg, 5, 0xFFE066);
-    snprintf(b, sizeof b, "+%d PONTOS", lastPts); text_c(140, b, 4, 0xFFFFFF);
-  }
-  if (state == ST_OVER && stateT > 0.5f) {
-    text_c(90, msg, 5, 0xFF5A5A);
-    snprintf(b, sizeof b, "PONTOS %d", score); text_c(135, b, 4, 0xFFFFFF);
-    text_c(175, "START REINICIA", 3, 0xFFE066);
-  }
 }
 
-/* ---------- entrada ---------- */
-static void read_pad(int *cross, int *start, int *left, int *right) {
-  padInfo info; padData d;
-  *cross = *start = *left = *right = 0;
-  ioPadGetInfo(&info);
-  for (int i = 0; i < MAX_PADS; i++) {
-    if (info.status[i]) {
-      ioPadGetData(i, &d);
-      if (d.BTN_CROSS) *cross = 1;
-      if (d.BTN_START) *start = 1;
-      if (d.BTN_LEFT)  *left = 1;
-      if (d.BTN_RIGHT) *right = 1;
+static void render(void)
+{
+    char buf[32];
+    int ui = (int)(4 * S + 0.5f);
+    if (ui < 3) ui = 3;
+
+    /* ceu */
+    for (int i = 0; i < 37; i++) {
+        u32 col = ((u32)(70 + i * 3) << 16) | ((u32)(140 + i * 2) << 8) | (u32)(215 + i / 2);
+        R(0, i * 20, 1280, 21, col);
     }
-  }
+    C(1120, 110, 50, 0x00FFE066);
+    for (int k = 0; k < 3; k++) {
+        float x = fmodf(gt * 12.0f + k * 480.0f, 1500.0f) - 110.0f;
+        float y = 80.0f + k * 60.0f;
+        C(x, y, 28, 0x00F2F6FF);
+        C(x + 30, y + 6, 22, 0x00F2F6FF);
+        C(x - 30, y + 8, 20, 0x00F2F6FF);
+    }
+
+    /* deck e torre */
+    R(0, WATERY, 362, 160, 0x00B9B3A6);
+    R(0, WATERY, 362, 8, 0x00E2DDD0);
+    R(354, WATERY, 10, 160, 0x00DADADA);
+    float py = plat_y();
+    R(120, py + 12, 90, WATERY - py - 12, 0x006B7684);
+    R(100, py, 175, 12, 0x00D0D6E0);
+    R(100, py + 12, 175, 4, 0x00959DAA);
+
+    draw_diver();
+    draw_water();
+
+    for (int i = 0; i < NPART; i++)
+        if (plife[i] > 0) C(ppx[i], ppy[i], 3.5f, 0x00E8F6FF);
+
+    /* HUD */
+    sprintf(buf, "DIVE %d/%d", dive_no, NDIVES);
+    draw_text(buf, 24, 20, ui, 0x00FFFFFF);
+    draw_text("SCORE", 24, 20 + 7 * ui, ui, 0x00FFFFFF);
+    sprintf(buf, "%d", total);
+    draw_text(buf, 24, 20 + 14 * ui, ui + 2, 0x00FFD23F);
+    draw_text("BEST", (int)W - 24 - text_width("BEST", ui), 20, ui, 0x00FFFFFF);
+    sprintf(buf, "%d", best);
+    draw_text(buf, (int)W - 24 - text_width(buf, ui + 2), 20 + 7 * ui, ui + 2, 0x00FFD23F);
+
+    if (state == ST_AIR) {
+        int fl = (int)(fabsf(rot_acc) / (2 * PI) + 0.12f);
+        sprintf(buf, "FLIPS %d", fl);
+        draw_center(buf, (int)W / 2, 20, ui * 2, 0x00FFFFFF);
+    }
+    if (state == ST_READY || state == ST_AIR) {
+        draw_text("X JUMP", 24, (int)H - 14 * ui, ui, 0x00FFFFFF);
+        draw_text("L1 R1 SPIN  SQUARE TUCK", 24, (int)H - 7 * ui, ui, 0x00FFFFFF);
+    }
+    if (state == ST_SPLASH) {
+        draw_center(qname[quality], (int)W / 2, (int)(150 * S), ui * 3, qcol[quality]);
+        sprintf(buf, "+%d", last_pts);
+        draw_center(buf, (int)W / 2, (int)(150 * S) + 20 * ui, ui * 2, 0x00FFD23F);
+        sprintf(buf, "FLIPS %d", last_flips);
+        draw_center(buf, (int)W / 2, (int)(150 * S) + 32 * ui, ui, 0x00FFFFFF);
+    }
+    if (state == ST_END) {
+        int bw = (int)(520 * S), bh = (int)(330 * S);
+        int bx = (int)W / 2 - bw / 2, by = (int)H / 2 - bh / 2;
+        fill_rect(bx, by, bw, bh, 0x00000000);
+        draw_center("RESULT", (int)W / 2, by + 20, ui * 2, 0x0055D6FF);
+        draw_center("TOTAL", (int)W / 2, by + 20 + 14 * ui, ui, 0x00FFFFFF);
+        sprintf(buf, "%d", total);
+        draw_center(buf, (int)W / 2, by + 20 + 21 * ui, ui * 3, 0x00FFD23F);
+        draw_center("BEST", (int)W / 2, by + 20 + 40 * ui, ui, 0x00FFFFFF);
+        sprintf(buf, "%d", best);
+        draw_center(buf, (int)W / 2, by + 20 + 47 * ui, ui * 2, 0x0066FF66);
+        draw_center("PRESS X", (int)W / 2, by + bh - 10 * ui, ui, 0x00FFFFFF);
+    }
 }
 
-int main(int argc, const char *argv[]) {
-  init_screen();
-  ioPadInit(7);
-  sysUtilRegisterCallback(0, sysutil_cb, NULL);
-  new_game();
+int main(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    init_screen();
+    S = (float)W / 1280.0f;
+    ioPadInit(7);
+    sysUtilRegisterCallback(0, sysutil_cb, NULL);
+    srand(20261113);
+    init_dive();
 
-  int pc = 0, ps = 0, pl = 0, pr = 0;
-  while (running) {
-    sysUtilCheckCallback();
-    wait_flip();
-    int c, s, l, r;
-    read_pad(&c, &s, &l, &r);
-    update(c && !pc, s && !ps, l && !pl, r && !pr);
-    pc = c; ps = s; pl = l; pr = r;
-    render();
-    present(&buffers[currentBuffer]);
-    do_flip(currentBuffer);
-    currentBuffer = !currentBuffer;
-  }
-  ioPadEnd();
-  return 0;
+    while (running) {
+        sysUtilCheckCallback();
+        read_pad();
+        update_game();
+        render();
+        present();
+    }
+    return 0;
 }
