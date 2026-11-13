@@ -31,19 +31,15 @@ jobs:
           python3 - <<'PY'
           import zlib, struct
           W, H = 320, 176
-          dots = [(60 + i * 22, 40 + 3 * (i - 4) ** 2, 8) for i in range(10)]
+          bars = [(50 + i * 24, 40 + (i * 37) % 70) for i in range(10)]
           raw = b''
           for y in range(H):
               raw += b'\x00'
               for x in range(W):
-                  if y > 130:
-                      px = (30, 110 + (y - 130) * 2, 200)
-                  else:
-                      px = (70 + y // 3, 150 + y // 4, 230)
-                  for i, (cx, cy, r) in enumerate(dots):
-                      rr = 14 if i == 9 else r
-                      if (x - cx) ** 2 + (y - cy) ** 2 < rr * rr:
-                          px = (255, 210, 63) if i == 9 else (255, 255, 255)
+                  px = (14 + y // 10, 18 + y // 8, 40 + y // 2)
+                  for i, (bx, bh) in enumerate(bars):
+                      if bx <= x < bx + 16 and H - 20 - bh <= y < H - 20:
+                          px = (85, 214, 255) if i % 2 == 0 else (102, 255, 102)
                   raw += bytes(px)
           def chunk(t, d):
               c = struct.pack('>I', len(d)) + t + d
@@ -57,5 +53,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: mergulho-flip-pkg
-          path: dive.pkg
+          name: meu-player-pkg
+          path: player.pkg
