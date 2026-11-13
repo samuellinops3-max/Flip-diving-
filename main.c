@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <stdint.h>
 #include <math.h>
 #include <ctype.h>
 #include <dirent.h>
@@ -49,9 +51,7 @@ static void init_screen(void)
 
     videoState st;
     videoGetState(VIDEO_PRIMARY, 0, &st);
-    u32 resid = st.displayMode.resolution;
-    if (videoGetResolutionAvailability(VIDEO_PRIMARY, VIDEO_RESOLUTION_720, VIDEO_ASPECT_AUTO, 0))
-        resid = VIDEO_RESOLUTION_720;
+    u32 resid = VIDEO_RESOLUTION_720;
 
     videoResolution res;
     videoGetResolution(resid, &res);
@@ -208,7 +208,6 @@ static void scan_music(void)
         }
         closedir(dp);
     }
-    /* ordena por nome */
     for (int i = 0; i < ntr; i++)
         for (int j = i + 1; j < ntr; j++)
             if (strcasecmp(tname[j], tname[i]) < 0) {
@@ -229,7 +228,6 @@ static int audio_ok = 0;
 static float volume = 0.8f;
 static float level = 0.0f;
 
-/* arquivo WAV em streaming */
 static FILE *wf = NULL;
 static int w_ch = 2;
 static long w_rate = 44100, w_left = 0, w_total = 0;
@@ -362,8 +360,8 @@ static void audio_start(void)
     if (audioInit() != 0) return;
     if (audioPortOpen(&p, &aport) != 0) return;
     audioGetPortConfig(aport, &acfg);
-    abuf = (float *)(u64)acfg.audioDataStart;
-    arix = (volatile u32 *)(u64)acfg.readIndex;
+    abuf = (float *)(uintptr_t)acfg.audioDataStart;
+    arix = (volatile u32 *)(uintptr_t)acfg.readIndex;
     memset(abuf, 0, NBLK * BLKS * 2 * sizeof(float));
     wblk = 0;
     audioPortStart(aport);
@@ -435,7 +433,6 @@ static void render(void)
         return;
     }
 
-    /* lista */
     int rows = 9;
     int top = sel - rows / 2;
     if (top < 0) top = 0;
@@ -452,14 +449,13 @@ static void render(void)
         draw_text(nm, (int)(90 * S), y, ui * 2, col);
     }
 
-    /* barra de progresso */
     R(40, 560, 1200, 12, 0x00303A55);
     if (playing >= 0 && w_total > 0) {
         float frac = (float)(w_pos / (double)w_total);
         if (frac > 1) frac = 1;
         R(40, 560, 1200 * frac, 12, 0x0055D6FF);
         char t1[16], t2[16];
-        fmt_time(t1, (long)(w_pos / 48000.0 * (48000.0 / (double)w_rate) * (double)w_rate / 48000.0 * 48000.0 / (double)w_rate));
+        fmt_time(t1, (long)(w_pos / 48000.0));
         fmt_time(t2, w_total / w_rate);
         sprintf(buf, "%s / %s", t1, t2);
         draw_text(buf, (int)(40 * S), (int)(585 * S), ui * 2, 0x00FFFFFF);
@@ -469,12 +465,10 @@ static void render(void)
         draw_text("PRESS X TO PLAY", (int)(40 * S), (int)(585 * S), ui * 2, 0x00809BBF);
     }
 
-    /* volume */
     draw_text("VOL", (int)(900 * S), (int)(585 * S), ui * 2, 0x00FFFFFF);
     R(990, 592, 250, 14, 0x00303A55);
     R(990, 592, 250 * volume, 14, 0x00FFD23F);
 
-    /* medidor */
     float lv = level * 2.2f;
     if (lv > 1) lv = 1;
     for (int b = 0; b < 16; b++) {
